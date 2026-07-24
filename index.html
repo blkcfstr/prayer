@@ -160,25 +160,26 @@
     }
     return "";
   }
-  // iOS: the mic track can die between session start and the first Talk tap
-  // (backgrounding, lock, audio-session changes). Re-acquire when not live.
-  function ensureStream() {
-    if (stream) {
-      var tracks = stream.getAudioTracks();
-      if (tracks.length && tracks[0].readyState === "live") return Promise.resolve(stream);
-    }
-    return navigator.mediaDevices.getUserMedia({ audio: true }).then(function (s) { stream = s; return s; });
-  }
+  // iOS kills or mutes microphone streams that are held across audio playback,
+  // so every recording acquires a FRESH stream and releases it when done. The
+  // mic indicator should only be visible while actually recording.
   var recHandled = false;
+  function releaseStream() {
+    if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
+  }
+  function talkUIIdle() { $("talk").textContent = "Talk"; $("talk").classList.remove("rec"); }
   function startRec() {
     player.pause(); // recording while TTS plays can mute the mic on iOS
-    ensureStream().then(function () {
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (s) {
+      stream = s;
       chunks = []; recHandled = false;
-      try { rec = new MediaRecorder(stream, mime() ? { mimeType: mime() } : undefined); }
-      catch (e) { toast("Recorder failed: " + e.message); return; }
+      try { rec = new MediaRecorder(s, mime() ? { mimeType: mime() } : undefined); }
+      catch (e) { toast("Recorder failed: " + e.message); releaseStream(); return; }
       rec.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
       rec.onstop = handleRecording;
-      rec.onerror = function (e) { status(""); toast("Recording error" + (e && e.error ? ": " + e.error.name : "")); };
+      rec.onerror = function () { handleRecording(); }; // salvage whatever was captured
+      var track = s.getAudioTracks()[0];
+      if (track) track.onended = function () { if (rec && rec.state === "recording") rec.stop(); };
       rec.start(500); // timeslice: collect chunks during recording, not only at stop
       $("talk").textContent = "Stop"; $("talk").classList.add("rec");
       status("Listening");
@@ -186,23 +187,29 @@
   }
   function stopRec() {
     if (rec && rec.state !== "inactive") rec.stop();
-    $("talk").textContent = "Talk"; $("talk").classList.remove("rec");
+    talkUIIdle();
     // Watchdog: iOS occasionally never fires onstop. Salvage the chunks we have.
     setTimeout(function () {
       if (recHandled) return;
       if (chunks.length) handleRecording();
-      else { status(""); toast("No audio captured — tap Talk and try again"); }
+      else { status(""); releaseStream(); toast("No audio captured — tap Talk and try again"); }
     }, 1500);
   }
   function handleRecording() {
     if (recHandled) return;
     recHandled = true;
+    talkUIIdle();
+    releaseStream();
     var blob = new Blob(chunks, { type: (rec && rec.mimeType) || "audio/mp4" });
     lastBlob = blob;
+    if (blob.size < 2000) {
+      status("");
+      toast("Recording was cut short — tap Talk and try again");
+      return;
+    }
     sendAudio(blob);
   }
   function sendAudio(blob) {
-    if (blob.size < 2000) { status(""); return; } // accidental tap
     S.busy = true; status("Transcribing");
     api("/api/stt", blob, true)
       .then(function (res) {
@@ -278,8 +285,10 @@
     // unlock audio inside this user gesture
     player.src = "data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAACAAABhgC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7v///////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAAYYoRBqpAAAAAAD/+xDEAAPAAAGkAAAAIAAANIAAAARMQU1FMy4xMDBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV";
     player.play().catch(function () {});
+    // Probe for mic permission now (prompt at a convenient moment), then release
+    // immediately — each recording acquires its own fresh stream (iOS requirement).
     navigator.mediaDevices.getUserMedia({ audio: true })
-      .then(function (s) { stream = s; })
+      .then(function (s) { s.getTracks().forEach(function (t) { t.stop(); }); })
       .catch(function () { toast("Microphone permission needed to talk — you can still listen"); })
       .then(function () { return api("/api/start", { short: $("short").checked }); })
       .then(function (res) {
@@ -298,7 +307,7 @@
     if (rec && rec.state === "recording") stopRec(); else startRec();
   };
   $("advancebtn").onclick = function () { if (rec && rec.state === "recording") stopRec(); else advance(false); };
-  $("skipbtn").onclick = function () { if (rec && rec.state === "recording") { recHandled = true; rec.onstop = null; chunks = []; stopRec(); status(""); } else advance(true); };
+  $("skipbtn").onclick = function () { if (rec && rec.state === "recording") { recHandled = true; rec.onstop = null; chunks = []; stopRec(); releaseStream(); status(""); } else advance(true); };
   $("endlink").onclick = function () { if (confirm("End the session and write the journal?")) finish(); };
 
   var saved = localStorage.getItem("prayerToken");
