@@ -160,23 +160,44 @@
     }
     return "";
   }
+  // iOS: the mic track can die between session start and the first Talk tap
+  // (backgrounding, lock, audio-session changes). Re-acquire when not live.
+  function ensureStream() {
+    if (stream) {
+      var tracks = stream.getAudioTracks();
+      if (tracks.length && tracks[0].readyState === "live") return Promise.resolve(stream);
+    }
+    return navigator.mediaDevices.getUserMedia({ audio: true }).then(function (s) { stream = s; return s; });
+  }
+  var recHandled = false;
   function startRec() {
-    if (!stream) { toast("No microphone access"); return; }
-    chunks = [];
-    try { rec = new MediaRecorder(stream, mime() ? { mimeType: mime() } : undefined); }
-    catch (e) { toast("Recorder failed: " + e.message); return; }
-    rec.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
-    rec.onstop = handleRecording;
-    rec.start();
-    $("talk").textContent = "Stop"; $("talk").classList.add("rec");
-    status("Listening");
+    player.pause(); // recording while TTS plays can mute the mic on iOS
+    ensureStream().then(function () {
+      chunks = []; recHandled = false;
+      try { rec = new MediaRecorder(stream, mime() ? { mimeType: mime() } : undefined); }
+      catch (e) { toast("Recorder failed: " + e.message); return; }
+      rec.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
+      rec.onstop = handleRecording;
+      rec.onerror = function (e) { status(""); toast("Recording error" + (e && e.error ? ": " + e.error.name : "")); };
+      rec.start(500); // timeslice: collect chunks during recording, not only at stop
+      $("talk").textContent = "Stop"; $("talk").classList.add("rec");
+      status("Listening");
+    }).catch(function () { toast("No microphone access — check Settings > Prayer > Microphone"); });
   }
   function stopRec() {
     if (rec && rec.state !== "inactive") rec.stop();
     $("talk").textContent = "Talk"; $("talk").classList.remove("rec");
+    // Watchdog: iOS occasionally never fires onstop. Salvage the chunks we have.
+    setTimeout(function () {
+      if (recHandled) return;
+      if (chunks.length) handleRecording();
+      else { status(""); toast("No audio captured — tap Talk and try again"); }
+    }, 1500);
   }
   function handleRecording() {
-    var blob = new Blob(chunks, { type: rec.mimeType || "audio/mp4" });
+    if (recHandled) return;
+    recHandled = true;
+    var blob = new Blob(chunks, { type: (rec && rec.mimeType) || "audio/mp4" });
     lastBlob = blob;
     sendAudio(blob);
   }
@@ -277,7 +298,7 @@
     if (rec && rec.state === "recording") stopRec(); else startRec();
   };
   $("advancebtn").onclick = function () { if (rec && rec.state === "recording") stopRec(); else advance(false); };
-  $("skipbtn").onclick = function () { if (rec && rec.state === "recording") { rec.onstop = null; stopRec(); status(""); } else advance(true); };
+  $("skipbtn").onclick = function () { if (rec && rec.state === "recording") { recHandled = true; rec.onstop = null; chunks = []; stopRec(); status(""); } else advance(true); };
   $("endlink").onclick = function () { if (confirm("End the session and write the journal?")) finish(); };
 
   var saved = localStorage.getItem("prayerToken");
