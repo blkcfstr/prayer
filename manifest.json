@@ -1,0 +1,9 @@
+{
+  "name": "Prayer",
+  "short_name": "Prayer",
+  "display": "standalone",
+  "start_url": "./",
+  "background_color": "#10141b",
+  "theme_color": "#10141b",
+  "icons": []
+}

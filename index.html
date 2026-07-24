@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Prayer</title>
+<link rel="manifest" href="manifest.json">
+<style>
+  :root { --bg:#10141b; --fg:#e8e4da; --dim:#8a8577; --accent:#c9a86a; --danger:#b3564e; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:17px/1.5 -apple-system, Georgia, serif;
+         height:100dvh; display:flex; flex-direction:column; overflow:hidden;
+         padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  .screen { flex:1; display:none; flex-direction:column; padding:20px; min-height:0; }
+  .screen.active { display:flex; }
+  h1 { font-size:26px; font-weight:normal; letter-spacing:.04em; margin:40px 0 8px; }
+  .sub { color:var(--dim); font-size:15px; margin-bottom:28px; }
+  input[type=password] { width:100%; padding:14px; font-size:17px; border-radius:10px; border:1px solid #2a3140;
+         background:#171d27; color:var(--fg); margin-bottom:16px; }
+  .btn { display:block; width:100%; padding:16px; font-size:18px; border-radius:12px; border:none;
+         background:#232b38; color:var(--fg); margin-bottom:12px; }
+  .btn.primary { background:var(--accent); color:#181410; font-weight:600; }
+  label.chk { display:flex; align-items:center; gap:10px; color:var(--dim); margin:4px 0 20px; font-size:16px; }
+  #movement { text-align:center; font-size:13px; letter-spacing:.24em; text-transform:uppercase; color:var(--accent); margin:4px 0 2px; }
+  #cardname { text-align:center; font-size:15px; color:var(--dim); min-height:22px; }
+  #guidetext { flex:1; overflow-y:auto; padding:14px 6px; font-size:16px; color:#c9c4b8; -webkit-overflow-scrolling:touch; }
+  #guidetext .you { color:#6f7a8c; font-style:italic; }
+  #guidetext p { margin:0 0 14px; }
+  #status { text-align:center; min-height:24px; font-size:14px; color:var(--dim); }
+  #controls { padding:8px 0 10px; }
+  #talk { display:block; margin:10px auto; width:120px; height:120px; border-radius:50%; border:2px solid var(--accent);
+          background:#1a212c; color:var(--fg); font-size:17px; }
+  #talk.rec { background:var(--danger); border-color:var(--danger); animation:pulse 1.4s infinite; }
+  @keyframes pulse { 50% { transform:scale(1.05); } }
+  .row { display:flex; gap:10px; }
+  .row .btn { flex:1; margin-bottom:0; padding:13px; font-size:16px; }
+  #endlink { text-align:center; color:#4d5666; font-size:13px; margin-top:10px; text-decoration:underline; }
+  #donebox { margin-top:60px; text-align:center; }
+  #donebox a { color:var(--accent); }
+  #toast { position:fixed; left:16px; right:16px; bottom:30px; background:#3a2c2a; color:#f0d9d5;
+           padding:12px 16px; border-radius:10px; font-size:15px; display:none; z-index:9; }
+</style>
+</head>
+<body>
+
+<div id="setup" class="screen active">
+  <h1>Prayer</h1>
+  <div class="sub" id="setupsub">Morning prayer walk</div>
+  <input type="password" id="token" placeholder="App token" autocomplete="current-password">
+  <label class="chk"><input type="checkbox" id="short"> Short session today</label>
+  <button class="btn primary" id="startbtn">Begin</button>
+</div>
+
+<div id="session" class="screen">
+  <div id="movement"></div>
+  <div id="cardname"></div>
+  <div id="guidetext"></div>
+  <div id="status"></div>
+  <div id="controls">
+    <button id="talk">Talk</button>
+    <div class="row">
+      <button class="btn" id="skipbtn">Skip</button>
+      <button class="btn" id="advancebtn">Move on</button>
+    </div>
+    <div id="endlink">End session now</div>
+  </div>
+</div>
+
+<div id="done" class="screen">
+  <h1>Amen.</h1>
+  <div id="donebox"></div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+(function () {
+  var API_BASE = "https://azdhfcmvbiprgzjzwecz.supabase.co/functions/v1/prayer";
+  var MOVEMENTS = ["centering", "worship", "word", "intercession", "listen", "close"];
+  var LABELS = { centering: "Centering", worship: "Worship & Thanksgiving", word: "The Word",
+                 intercession: "Intercession", listen: "Listen", close: "Close" };
+  var S = { ctx: null, mi: 0, cardIndex: 0, history: [], cardsPrayed: [], busy: false, closed: false };
+  var rec = null, chunks = [], stream = null, lastBlob = null, wakeLock = null;
+  var player = new Audio();
+
+  function $(id) { return document.getElementById(id); }
+  function show(id) {
+    var s = document.querySelectorAll(".screen");
+    for (var i = 0; i < s.length; i++) s[i].classList.remove("active");
+    $(id).classList.add("active");
+  }
+  function toast(msg) {
+    var t = $("toast"); t.textContent = msg; t.style.display = "block";
+    setTimeout(function () { t.style.display = "none"; }, 4000);
+  }
+  function status(msg) { $("status").textContent = msg || ""; }
+  function movement() { return MOVEMENTS[S.mi]; }
+
+  function addText(cls, text) {
+    var g = $("guidetext"), p = document.createElement("p");
+    if (cls) p.className = cls;
+    p.textContent = text;
+    g.appendChild(p); g.scrollTop = g.scrollHeight;
+  }
+  function refreshHeader() {
+    $("movement").textContent = LABELS[movement()];
+    var c = "";
+    if (movement() === "intercession" && S.ctx.cards[S.cardIndex]) {
+      c = S.ctx.cards[S.cardIndex].title + "  (" + (S.cardIndex + 1) + "/" + S.ctx.cards.length + ")";
+    }
+    $("cardname").textContent = c;
+  }
+
+  function api(path, body, raw) {
+    var opts = { method: "POST", headers: { "x-prayer-token": localStorage.getItem("prayerToken") || "" } };
+    if (raw) { opts.body = body; }
+    else { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+    return fetch(API_BASE + path, opts).then(function (r) {
+      return r.json().then(function (j) {
+        if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+        return j;
+      });
+    });
+  }
+
+  function playAudio(b64) {
+    if (!b64) return;
+    player.src = "data:audio/mp3;base64," + b64;
+    player.play().catch(function () {});
+  }
+
+  function guide(event) {
+    S.busy = true; status("…");
+    return api("/api/guide", { ctx: S.ctx, movement: movement(), cardIndex: S.cardIndex, event: event, history: S.history })
+      .then(function (res) {
+        S.history.push({ role: "guide", text: res.text, movement: movement() });
+        addText(null, res.text);
+        playAudio(res.audio);
+        S.busy = false; status("");
+      })
+      .catch(function (e) { S.busy = false; status(""); toast("Guide error: " + e.message + " — tap Move on to retry"); });
+  }
+
+  // ── Recording ──────────────────────────────────────────────────────────────
+  function mime() {
+    var opts = ["audio/mp4", "audio/webm;codecs=opus", "audio/webm"];
+    for (var i = 0; i < opts.length; i++) {
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported(opts[i])) return opts[i];
+    }
+    return "";
+  }
+  function startRec() {
+    if (!stream) { toast("No microphone access"); return; }
+    chunks = [];
+    try { rec = new MediaRecorder(stream, mime() ? { mimeType: mime() } : undefined); }
+    catch (e) { toast("Recorder failed: " + e.message); return; }
+    rec.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
+    rec.onstop = handleRecording;
+    rec.start();
+    $("talk").textContent = "Stop"; $("talk").classList.add("rec");
+    status("listening");
+  }
+  function stopRec() {
+    if (rec && rec.state !== "inactive") rec.stop();
+    $("talk").textContent = "Talk"; $("talk").classList.remove("rec");
+  }
+  function handleRecording() {
+    var blob = new Blob(chunks, { type: rec.mimeType || "audio/mp4" });
+    lastBlob = blob;
+    sendAudio(blob);
+  }
+  function sendAudio(blob) {
+    if (blob.size < 2000) { status(""); return; } // accidental tap
+    S.busy = true; status("transcribing");
+    api("/api/stt", blob, true)
+      .then(function (res) {
+        S.busy = false;
+        if (!res.text) { status(""); return; }
+        S.history.push({ role: "blake", text: res.text, movement: movement() });
+        addText("you", "You: " + res.text);
+        return guide("user_turn");
+      })
+      .catch(function (e) {
+        S.busy = false; status("");
+        toast("Transcription failed: " + e.message + " — tap Talk twice to retry last recording");
+        $("talk").ondblclick = function () { if (lastBlob) sendAudio(lastBlob); };
+      });
+  }
+
+  // ── Movement flow ──────────────────────────────────────────────────────────
+  function advance(skipped) {
+    if (S.busy) { S.busy = false; status(""); } // allow advance as retry/unstick
+    if (movement() === "intercession") {
+      var card = S.ctx.cards[S.cardIndex];
+      if (card && !skipped && S.cardsPrayed.indexOf(card.id) < 0) S.cardsPrayed.push(card.id);
+      if (S.cardIndex + 1 < S.ctx.cards.length) {
+        S.cardIndex++; refreshHeader();
+        return guide("open_card");
+      }
+    }
+    if (movement() === "close") return finish();
+    S.mi++;
+    refreshHeader();
+    if (movement() === "intercession") {
+      S.cardIndex = 0; refreshHeader();
+      return guide("open_card");
+    }
+    return guide("open_movement");
+  }
+
+  function finish() {
+    if (S.closed) return;
+    S.closed = true;
+    status("writing your journal");
+    $("controls").style.opacity = "0.4";
+    api("/api/close", { ctx: S.ctx, history: S.history, cardsPrayed: S.cardsPrayed })
+      .then(function (res) {
+        show("done");
+        var d = $("donebox");
+        d.innerHTML = "";
+        var p = document.createElement("p"); p.textContent = res.title; d.appendChild(p);
+        var a = document.createElement("a"); a.href = res.url; a.textContent = "Open journal in Notion"; d.appendChild(a);
+        if (wakeLock) { try { wakeLock.release(); } catch (e) {} }
+      })
+      .catch(function (e) {
+        S.closed = false; $("controls").style.opacity = "1"; status("");
+        toast("Journal failed: " + e.message + " — tap Move on to retry");
+      });
+  }
+
+  // ── Start ──────────────────────────────────────────────────────────────────
+  function acquireWakeLock() {
+    if (navigator.wakeLock && navigator.wakeLock.request) {
+      navigator.wakeLock.request("screen").then(function (wl) { wakeLock = wl; }).catch(function () {});
+    }
+  }
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible" && !S.closed && S.ctx) acquireWakeLock();
+  });
+
+  $("startbtn").onclick = function () {
+    var token = $("token").value.trim() || localStorage.getItem("prayerToken") || "";
+    if (!token) { toast("Enter the app token"); return; }
+    localStorage.setItem("prayerToken", token);
+    $("startbtn").disabled = true; $("startbtn").textContent = "Preparing…";
+    // unlock audio inside this user gesture
+    player.src = "data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAACAAABhgC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7v///////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAAYYoRBqpAAAAAAD/+xDEAAPAAAGkAAAAIAAANIAAAARMQU1FMy4xMDBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV";
+    player.play().catch(function () {});
+    navigator.mediaDevices.getUserMedia({ audio: true })
+      .then(function (s) { stream = s; })
+      .catch(function () { toast("Microphone permission needed to talk — you can still listen"); })
+      .then(function () { return api("/api/start", { short: $("short").checked }); })
+      .then(function (res) {
+        S.ctx = res.ctx;
+        show("session"); refreshHeader(); acquireWakeLock();
+        return guide("open_movement");
+      })
+      .catch(function (e) {
+        $("startbtn").disabled = false; $("startbtn").textContent = "Begin";
+        toast("Could not start: " + e.message);
+      });
+  };
+
+  $("talk").onclick = function () {
+    if (S.busy) return;
+    if (rec && rec.state === "recording") stopRec(); else startRec();
+  };
+  $("advancebtn").onclick = function () { if (rec && rec.state === "recording") stopRec(); else advance(false); };
+  $("skipbtn").onclick = function () { if (rec && rec.state === "recording") { rec.onstop = null; stopRec(); status(""); } else advance(true); };
+  $("endlink").onclick = function () { if (confirm("End the session and write the journal?")) finish(); };
+
+  var saved = localStorage.getItem("prayerToken");
+  if (saved) { $("token").value = saved; $("setupsub").textContent = "Morning prayer walk — token saved"; }
+})();
+</script>
+</body>
+</html>
