@@ -28,7 +28,12 @@
   #guidetext { flex:1; overflow-y:auto; padding:14px 6px; font-size:16px; color:#c9c4b8; -webkit-overflow-scrolling:touch; }
   #guidetext .you { color:#6f7a8c; font-style:italic; }
   #guidetext p { margin:0 0 14px; }
-  #status { text-align:center; min-height:24px; font-size:14px; color:var(--dim); }
+  #status { display:none; margin:0 auto 4px; align-items:center; justify-content:center; gap:10px;
+            font-size:16px; color:var(--accent); min-height:30px; letter-spacing:.02em; }
+  #status.on { display:flex; }
+  #status .spin { width:18px; height:18px; border-radius:50%; border:2.5px solid #3a4356;
+                  border-top-color:var(--accent); animation:rot .9s linear infinite; flex:none; }
+  @keyframes rot { to { transform:rotate(360deg); } }
   #controls { padding:8px 0 10px; }
   #talk { display:block; margin:10px auto; width:120px; height:120px; border-radius:50%; border:2px solid var(--accent);
           background:#1a212c; color:var(--fg); font-size:17px; }
@@ -57,7 +62,7 @@
   <div id="movement"></div>
   <div id="cardname"></div>
   <div id="guidetext"></div>
-  <div id="status"></div>
+  <div id="status"><div class="spin"></div><span id="statustext"></span></div>
   <div id="controls">
     <button id="talk">Talk</button>
     <div class="row">
@@ -95,7 +100,11 @@
     var t = $("toast"); t.textContent = msg; t.style.display = "block";
     setTimeout(function () { t.style.display = "none"; }, 4000);
   }
-  function status(msg) { $("status").textContent = msg || ""; }
+  function status(msg) {
+    var s = $("status");
+    if (msg) { s.classList.add("on"); $("statustext").textContent = msg; }
+    else { s.classList.remove("on"); $("statustext").textContent = ""; }
+  }
   function movement() { return MOVEMENTS[S.mi]; }
 
   function addText(cls, text) {
@@ -132,7 +141,7 @@
   }
 
   function guide(event) {
-    S.busy = true; status("…");
+    S.busy = true; status("Thinking");
     return api("/api/guide", { ctx: S.ctx, movement: movement(), cardIndex: S.cardIndex, event: event, history: S.history })
       .then(function (res) {
         S.history.push({ role: "guide", text: res.text, movement: movement() });
@@ -160,7 +169,7 @@
     rec.onstop = handleRecording;
     rec.start();
     $("talk").textContent = "Stop"; $("talk").classList.add("rec");
-    status("listening");
+    status("Listening");
   }
   function stopRec() {
     if (rec && rec.state !== "inactive") rec.stop();
@@ -173,7 +182,7 @@
   }
   function sendAudio(blob) {
     if (blob.size < 2000) { status(""); return; } // accidental tap
-    S.busy = true; status("transcribing");
+    S.busy = true; status("Transcribing");
     api("/api/stt", blob, true)
       .then(function (res) {
         S.busy = false;
@@ -213,7 +222,7 @@
   function finish() {
     if (S.closed) return;
     S.closed = true;
-    status("writing your journal");
+    status("Writing your journal");
     $("controls").style.opacity = "0.4";
     api("/api/close", { ctx: S.ctx, history: S.history, cardsPrayed: S.cardsPrayed })
       .then(function (res) {
