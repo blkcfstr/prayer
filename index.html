@@ -23,6 +23,8 @@
          background:#232b38; color:var(--fg); margin-bottom:12px; }
   .btn.primary { background:var(--accent); color:#181410; font-weight:600; }
   label.chk { display:flex; align-items:center; gap:10px; color:var(--dim); margin:4px 0 20px; font-size:16px; }
+  .btn.len { font-size:16px; padding:13px; color:var(--dim); }
+  .btn.len.sel { background:var(--accent); color:#181410; font-weight:600; }
   #movement { text-align:center; font-size:13px; letter-spacing:.24em; text-transform:uppercase; color:var(--accent); margin:4px 0 2px; }
   #cardname { text-align:center; font-size:15px; color:var(--dim); min-height:22px; }
   #guidetext { flex:1; overflow-y:auto; padding:14px 6px; font-size:16px; color:#c9c4b8; -webkit-overflow-scrolling:touch; }
@@ -54,7 +56,11 @@
   <h1>Prayer</h1>
   <div class="sub" id="setupsub">Morning prayer walk</div>
   <input type="password" id="token" placeholder="App token" autocomplete="current-password">
-  <label class="chk"><input type="checkbox" id="short"> Short session today</label>
+  <div class="row" id="lenrow" style="margin:4px 0 20px;">
+    <button class="btn len" data-min="15">15 min</button>
+    <button class="btn len sel" data-min="30">30 min</button>
+    <button class="btn len" data-min="45">45 min</button>
+  </div>
   <button class="btn primary" id="startbtn">Begin</button>
 </div>
 
@@ -86,9 +92,21 @@
   var MOVEMENTS = ["centering", "worship", "word", "intercession", "listen", "close"];
   var LABELS = { centering: "Centering", worship: "Worship & Thanksgiving", word: "The Word",
                  intercession: "Intercession", listen: "Listen", close: "Close" };
-  var S = { ctx: null, mi: 0, cardIndex: 0, history: [], cardsPrayed: [], busy: false, closed: false };
+  var S = { ctx: null, mi: 0, cardIndex: 0, history: [], cardsPrayed: [], busy: false, closed: false,
+            startAt: 0, targetMin: 30 };
   var rec = null, chunks = [], stream = null, lastBlob = null, wakeLock = null;
   var player = new Audio();
+  var audioQueue = [], playing = false;
+  player.addEventListener("ended", function () { playing = false; playNext(); });
+  player.addEventListener("error", function () { playing = false; playNext(); });
+  function playNext() {
+    if (playing) return;
+    var b = audioQueue.shift();
+    if (!b) return;
+    playing = true;
+    player.src = "data:audio/mp3;base64," + b;
+    player.play().catch(function () { playing = false; });
+  }
 
   function $(id) { return document.getElementById(id); }
   function show(id) {
@@ -136,20 +154,45 @@
 
   function playAudio(b64) {
     if (!b64) return;
-    player.src = "data:audio/mp3;base64," + b64;
-    player.play().catch(function () {});
+    audioQueue.push(b64);
+    playNext();
   }
 
   function guide(event) {
     S.busy = true; status("Thinking");
-    return api("/api/guide", { ctx: S.ctx, movement: movement(), cardIndex: S.cardIndex, event: event, history: S.history })
+    return api("/api/guide", {
+      ctx: S.ctx, movement: movement(), cardIndex: S.cardIndex, event: event, history: S.history,
+      elapsedMinutes: S.startAt ? Math.round((Date.now() - S.startAt) / 6000) / 10 : null,
+      targetMinutes: S.targetMin,
+    })
       .then(function (res) {
         S.history.push({ role: "guide", text: res.text, movement: movement() });
         addText(null, res.text);
         playAudio(res.audio);
         S.busy = false; status("");
+        if (res.advance) handleAdvance(res.advance);
       })
       .catch(function (e) { S.busy = false; status(""); toast("Guide error: " + e.message + " — tap Move on to retry"); });
+  }
+
+  // Guided pacing: the guide signals advancement; the bridge audio plays while
+  // the next beat's opening is fetched and queued behind it.
+  function handleAdvance(kind) {
+    if (movement() === "close") return finish();
+    if (movement() === "intercession") {
+      var card = S.ctx.cards[S.cardIndex];
+      if (card && S.cardsPrayed.indexOf(card.id) < 0) S.cardsPrayed.push(card.id);
+      if (kind === "card" && S.cardIndex + 1 < S.ctx.cards.length) {
+        S.cardIndex++; refreshHeader();
+        return guide("open_card");
+      }
+    }
+    S.mi++; refreshHeader();
+    if (movement() === "intercession") {
+      S.cardIndex = 0; refreshHeader();
+      return guide("open_card");
+    }
+    return guide("open_movement");
   }
 
   // ── Recording ──────────────────────────────────────────────────────────────
@@ -290,9 +333,10 @@
     navigator.mediaDevices.getUserMedia({ audio: true })
       .then(function (s) { s.getTracks().forEach(function (t) { t.stop(); }); })
       .catch(function () { toast("Microphone permission needed to talk — you can still listen"); })
-      .then(function () { return api("/api/start", { short: $("short").checked }); })
+      .then(function () { return api("/api/start", { targetMinutes: S.targetMin }); })
       .then(function (res) {
         S.ctx = res.ctx;
+        S.startAt = Date.now();
         show("session"); refreshHeader(); acquireWakeLock();
         return guide("open_movement");
       })
@@ -309,6 +353,15 @@
   $("advancebtn").onclick = function () { if (rec && rec.state === "recording") stopRec(); else advance(false); };
   $("skipbtn").onclick = function () { if (rec && rec.state === "recording") { recHandled = true; rec.onstop = null; chunks = []; stopRec(); releaseStream(); status(""); } else advance(true); };
   $("endlink").onclick = function () { if (confirm("End the session and write the journal?")) finish(); };
+
+  var lenBtns = document.querySelectorAll(".btn.len");
+  for (var li = 0; li < lenBtns.length; li++) {
+    lenBtns[li].onclick = function () {
+      for (var j = 0; j < lenBtns.length; j++) lenBtns[j].classList.remove("sel");
+      this.classList.add("sel");
+      S.targetMin = parseInt(this.getAttribute("data-min"), 10);
+    };
+  }
 
   var saved = localStorage.getItem("prayerToken");
   if (saved) { $("token").value = saved; $("setupsub").textContent = "Morning prayer walk — token saved"; }
