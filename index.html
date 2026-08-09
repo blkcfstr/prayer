@@ -311,10 +311,19 @@
   }
 
   // ── Start ──────────────────────────────────────────────────────────────────
+  // iOS grants wake locks reliably only during a real tap, and rejects them
+  // entirely in Low Power Mode — so acquire inside gestures and say so on failure.
+  var wakeFailed = false;
   function acquireWakeLock() {
-    if (navigator.wakeLock && navigator.wakeLock.request) {
-      navigator.wakeLock.request("screen").then(function (wl) { wakeLock = wl; }).catch(function () {});
-    }
+    if (!(navigator.wakeLock && navigator.wakeLock.request)) return;
+    if (wakeLock && wakeLock.released === false) return;
+    navigator.wakeLock.request("screen").then(function (wl) { wakeLock = wl; })
+      .catch(function () {
+        if (!wakeFailed) {
+          wakeFailed = true;
+          toast("Couldn't keep the screen awake — if Low Power Mode is on, the screen may still lock mid-session");
+        }
+      });
   }
   document.addEventListener("visibilitychange", function () {
     if (document.visibilityState === "visible" && !S.closed && S.ctx) acquireWakeLock();
@@ -323,6 +332,7 @@
   $("startbtn").onclick = function () {
     var token = $("token").value.trim() || localStorage.getItem("prayerToken") || "";
     if (!token) { toast("Enter the app token"); return; }
+    acquireWakeLock(); // inside the tap gesture, before any async work
     localStorage.setItem("prayerToken", token);
     $("startbtn").disabled = true; $("startbtn").textContent = "Preparing…";
     // unlock audio inside this user gesture
@@ -347,11 +357,12 @@
   };
 
   $("talk").onclick = function () {
+    acquireWakeLock();
     if (S.busy) return;
     if (rec && rec.state === "recording") stopRec(); else startRec();
   };
-  $("advancebtn").onclick = function () { if (rec && rec.state === "recording") stopRec(); else advance(false); };
-  $("skipbtn").onclick = function () { if (rec && rec.state === "recording") { recHandled = true; rec.onstop = null; chunks = []; stopRec(); releaseStream(); status(""); } else advance(true); };
+  $("advancebtn").onclick = function () { acquireWakeLock(); if (rec && rec.state === "recording") stopRec(); else advance(false); };
+  $("skipbtn").onclick = function () { acquireWakeLock(); if (rec && rec.state === "recording") { recHandled = true; rec.onstop = null; chunks = []; stopRec(); releaseStream(); status(""); } else advance(true); };
   $("endlink").onclick = function () { if (confirm("End the session and write the journal?")) finish(); };
 
   var lenBtns = document.querySelectorAll(".btn.len");
